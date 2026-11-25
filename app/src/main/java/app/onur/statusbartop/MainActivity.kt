@@ -16,6 +16,7 @@ import android.widget.TextView
 class MainActivity : Activity() {
 
     private lateinit var statusText: TextView
+    private lateinit var diagText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,8 +75,21 @@ class MainActivity : Activity() {
             )
         )
         column.addView(
-            switchRow(prefs, Prefs.DEBUG_TINT, false, "Test: Streifen rot einfärben")
+            switchRow(prefs, Prefs.DEBUG_TINT, false, "Test-Modus: Streifen rot einfärben + Diagnose aufzeichnen")
         )
+
+        column.addView(TextView(this).apply {
+            text = "Diagnose (nur im Test-Modus): Streifen in der anderen App antippen, dann hierher " +
+                "zurückkehren und diesen Bereich als Screenshot schicken."
+            textSize = 13f
+            setPadding(0, dp(20), 0, dp(8))
+        })
+        diagText = TextView(this).apply {
+            textSize = 11f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
+        column.addView(diagText)
 
         setContentView(ScrollView(this).apply { addView(column) })
     }
@@ -84,6 +98,7 @@ class MainActivity : Activity() {
         super.onResume()
         val active = isServiceEnabled()
         statusText.text = if (active) "Dienst: aktiv ✓" else "Dienst: NICHT aktiv"
+        diagText.text = Prefs.get(this).getString(Prefs.LAST_DIAG, null) ?: "(noch keine Diagnose)"
     }
 
     private fun switchRow(

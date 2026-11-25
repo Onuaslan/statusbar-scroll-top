@@ -15,6 +15,9 @@ object Prefs {
     /** Streifen rot einfärben, um Position und Aktivität zu testen. */
     const val DEBUG_TINT = "debug_tint"
 
+    /** Letzte Diagnose (nur im Test-Modus): was der Dienst beim letzten Tipp in der App-Oberfläche gesehen hat. */
+    const val LAST_DIAG = "last_diag"
+
     fun get(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 }

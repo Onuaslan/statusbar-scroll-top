@@ -60,6 +60,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
     }
 
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
+        if (key == Prefs.LAST_DIAG) return // Diagnose-Text schreiben darf den Streifen nicht neu aufbauen
         rebuildOverlay()
     }
 
@@ -225,7 +226,74 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
 
     private fun scrollToTop() {
         val token = ++scrollToken
+        if (prefs.getBoolean(Prefs.DEBUG_TINT, false)) {
+            val root = rootInActiveWindow
+            val target = if (root != null) findTarget(root) else null
+            prefs.edit().putString(Prefs.LAST_DIAG, buildDiagnosis(root, target)).apply()
+        }
         step(token, 0)
+    }
+
+    // ---------------------------------------------------------------- Diagnose (Test-Modus)
+
+    private fun actionNames(n: AccessibilityNodeInfo): String {
+        val actions = n.actionList
+        val names = ArrayList<String>()
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_UP)) names.add("UP")
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_DOWN)) names.add("DOWN")
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_LEFT)) names.add("LEFT")
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_RIGHT)) names.add("RIGHT")
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_BACKWARD)) names.add("BACKWARD")
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_FORWARD)) names.add("FORWARD")
+        if (actions.contains(AccessibilityAction.ACTION_SCROLL_TO_POSITION)) names.add("TO_POSITION")
+        return names.joinToString(",")
+    }
+
+    private fun buildDiagnosis(
+        root: AccessibilityNodeInfo?,
+        target: Pair<AccessibilityNodeInfo, AccessibilityAction>?
+    ): String {
+        val sb = StringBuilder()
+        sb.append("Zeit: ")
+            .append(java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.GERMANY).format(java.util.Date()))
+            .append('\n')
+        if (root == null) {
+            sb.append("Kein aktives Fenster (rootInActiveWindow = null)")
+            return sb.toString()
+        }
+        sb.append("Paket: ").append(root.packageName).append('\n')
+        if (target == null) {
+            sb.append("Ziel: KEIN Knoten mit Hoch-Scroll-Aktion gefunden\n")
+        } else {
+            sb.append("Ziel: ").append(target.first.className)
+                .append(" (").append(actionNames(target.first)).append(")\n")
+        }
+
+        val rect = Rect()
+        var listed = 0
+        var total = 0
+
+        fun visit(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || depth > MAX_DEPTH) return
+            total++
+            val names = actionNames(n)
+            if ((n.isScrollable || names.isNotEmpty()) && listed < 25) {
+                listed++
+                n.getBoundsInScreen(rect)
+                sb.append("- ").append(n.className)
+                    .append(" ").append(rect.flattenToString())
+                    .append(" sichtbar=").append(n.isVisibleToUser)
+                    .append(" scrollbar=").append(n.isScrollable)
+                    .append(" aktionen=").append(names.ifEmpty { "-" })
+                    .append(" tiefe=").append(depth)
+                    .append('\n')
+            }
+            for (i in 0 until n.childCount) visit(n.getChild(i), depth + 1)
+        }
+
+        visit(root, 0)
+        sb.append("Knoten im Baum gesamt: ").append(total)
+        return sb.toString()
     }
 
     private fun step(token: Int, iter: Int) {
