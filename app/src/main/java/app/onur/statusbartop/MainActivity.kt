@@ -70,8 +70,8 @@ class MainActivity : Activity() {
         column.addView(switchRow(prefs, Prefs.ENABLED, true, "Funktion aktiv"))
         column.addView(
             switchRow(
-                prefs, Prefs.HIDE_FULLSCREEN, true,
-                "In Vollbild (Videos, Spiele) durchlässig, wenn Statusleiste ausgeblendet ist"
+                prefs, Prefs.HIDE_FULLSCREEN, false,
+                "Experimentell: In Vollbild durchlässig (erkennt Vollbild auf manchen Handys falsch, dann AUS lassen)"
             )
         )
         column.addView(

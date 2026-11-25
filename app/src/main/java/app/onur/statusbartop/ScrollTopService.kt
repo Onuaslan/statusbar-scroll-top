@@ -152,7 +152,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
     private fun applyTouchability() {
         val view = overlay ?: return
         val lp = overlayParams ?: return
-        val hideInFullscreen = prefs.getBoolean(Prefs.HIDE_FULLSCREEN, true)
+        val hideInFullscreen = prefs.getBoolean(Prefs.HIDE_FULLSCREEN, false)
         // Das Benachrichtigungsfeld (SystemUI) sperrt den Streifen bewusst nicht mehr:
         // die Erkennung war unzuverlässig und konnte den Streifen dauerhaft abschalten.
         val touchable = statusBarVisible || !hideInFullscreen
@@ -255,6 +255,8 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
 
     private fun scrollToTop() {
         val token = ++scrollToken
+        lastFingerprint = 0L
+        sameCount = 0
         if (prefs.getBoolean(Prefs.DEBUG_TINT, false)) {
             val root = rootInActiveWindow
             val target = if (root != null) findTarget(root) else null
@@ -331,15 +333,57 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         val root = rootInActiveWindow ?: return
         val (node, action) = findTarget(root) ?: return // nichts mehr zum Hochscrollen -> fertig
 
-        // Nah am Anfang: seitenweise (sauber, ohne Überschwingen). Weit weg: schnelle Wisch-Gesten.
-        val distance = distanceEstimate(node)
-        val useFling = if (distance != null) distance > NEAR_ITEMS else iter >= PAGES_BEFORE_FLING
+        // Bewegt sich nichts mehr (z. B. oben angekommen, Aktion bleibt aber gemeldet), aufhören.
+        val fp = fingerprint(node)
+        if (fp == lastFingerprint) {
+            sameCount++
+            if (sameCount >= STAGNATION_LIMIT) return
+        } else {
+            sameCount = 0
+            lastFingerprint = fp
+        }
 
-        if (useFling) flingDown(token, iter, node, action) else pageUp(token, iter, node, action)
+        // Wisch-Gesten NUR, wenn die App die Listenposition meldet und wir weit vom Anfang entfernt sind.
+        // Sonst (z. B. Webseiten) nur Scroll-Aktionen: die schwingen nie über und lösen kein "Neu laden" aus.
+        val distance = distanceEstimate(node)
+        if (distance != null && distance > NEAR_ITEMS) {
+            flingDown(token, iter, node, action)
+        } else {
+            pageUp(token, iter, node, action, burst = distance == null)
+        }
     }
 
-    private fun pageUp(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
+    private var lastFingerprint = 0L
+    private var sameCount = 0
+
+    /** Grober Abdruck der Positionen im Teilbaum – ändert sich, solange gescrollt wird. */
+    private fun fingerprint(node: AccessibilityNodeInfo): Long {
+        var h = 17L
+        var count = 0
+        val r = Rect()
+
+        fun visit(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || count >= 150 || depth > 30) return
+            count++
+            n.getBoundsInScreen(r)
+            h = h * 31 + r.top
+            h = h * 31 + r.left
+            for (i in 0 until n.childCount) visit(n.getChild(i), depth + 1)
+        }
+
+        visit(node, 0)
+        return h
+    }
+
+    private fun pageUp(
+        token: Int,
+        iter: Int,
+        node: AccessibilityNodeInfo,
+        action: AccessibilityAction,
+        burst: Boolean = false
+    ) {
         node.performAction(action.id)
+        if (burst) node.performAction(action.id) // bei unbekannter Entfernung zwei Seiten pro Schritt
         handler.postDelayed({ step(token, iter + 1) }, PAGE_DELAY_MS)
     }
 
@@ -437,8 +481,8 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
     private companion object {
         const val MAX_STEPS = 80
         const val MAX_DEPTH = 60
-        const val NEAR_ITEMS = 10
-        const val PAGES_BEFORE_FLING = 3
-        const val PAGE_DELAY_MS = 130L
+        const val NEAR_ITEMS = 20
+        const val STAGNATION_LIMIT = 4
+        const val PAGE_DELAY_MS = 100L
     }
 }
