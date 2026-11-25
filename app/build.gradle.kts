@@ -11,8 +11,8 @@ android {
         applicationId = "app.onur.statusbartop"
         minSdk = 30
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5"
+        versionCode = 6
+        versionName = "0.6"
     }
 
     // Feste Signatur (liegt im Repo), damit Updates ueber die alte Installation moeglich sind.

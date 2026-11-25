@@ -20,6 +20,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Legt einen unsichtbaren Streifen über die Statusleiste.
@@ -255,8 +256,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
 
     private fun scrollToTop() {
         val token = ++scrollToken
-        lastFingerprint = 0L
-        sameCount = 0
+        resetRun()
         if (prefs.getBoolean(Prefs.DEBUG_TINT, false)) {
             val root = rootInActiveWindow
             val target = if (root != null) findTarget(root) else null
@@ -327,13 +327,35 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         return sb.toString()
     }
 
-    // Ablauf: Ziel einmal suchen, dann in dichter Folge kurze, sehr schnelle Wisch-Gesten nach unten.
-    // Kurzer Zugweg + hohe Geschwindigkeit = Fling mit Schwung (flüssig und schnell), aber der Zug ist
-    // zu kurz, um am Seitenanfang "Neu laden" auszulösen. Zwischen den Gesten wird nur geprüft, ob die
-    // "Hoch"-Aktion noch gemeldet wird – ist sie weg, ist man oben angekommen.
+    // Ablauf: Ziel einmal suchen und die Entfernung zum Anfang schätzen.
+    //  - Weit weg: große, sehr schnelle Züge (Inhalt folgt dem Finger 1:1, bis zu ~20 000 px/s). Jeder Zug
+    //    nimmt nur 60 % der geschätzten Restentfernung, damit nie über den Anfang hinaus gezogen wird.
+    //  - Nah dran / unbekannt: kurze Flicks (Zugweg zu kurz für "Neu laden").
+    // Zwischen den Zügen wird nur geprüft, ob die "Hoch"-Aktion noch gemeldet wird – ist sie weg, ist man oben.
     private var currentTarget: AccessibilityNodeInfo? = null
     private var lastFingerprint = 0L
     private var sameCount = 0
+
+    private var refNode: AccessibilityNodeInfo? = null
+    private var refTop0 = 0
+    private var distance0 = 0
+    private var bigDisabled = false
+    private var bigRan = false
+    private var prevDistance = Int.MAX_VALUE
+    private var stuckCount = 0
+
+    private fun resetRun() {
+        currentTarget = null
+        lastFingerprint = 0L
+        sameCount = 0
+        refNode = null
+        refTop0 = 0
+        distance0 = 0
+        bigDisabled = false
+        bigRan = false
+        prevDistance = Int.MAX_VALUE
+        stuckCount = 0
+    }
 
     private fun step(token: Int, iter: Int) {
         if (token != scrollToken || iter >= MAX_STEPS) return
@@ -364,7 +386,174 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
             }
         }
 
-        flick(token, iter, node, action)
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        bounds.intersect(wm.currentWindowMetrics.bounds)
+
+        var distance = 0
+        if (!bigDisabled && bounds.height() >= 600) {
+            distance = remainingDistance(node, bounds)
+            if (refNode == null) bigDisabled = true
+            // Bewegt sich der Inhalt trotz großer Züge nicht mehr -> große Züge abschalten
+            if (bigRan) {
+                if (distance >= prevDistance - 60) {
+                    stuckCount++
+                    if (stuckCount >= 2) bigDisabled = true
+                } else {
+                    stuckCount = 0
+                }
+            }
+            prevDistance = distance
+        }
+
+        if (!bigDisabled && distance > BIG_MIN_PX) {
+            bigRan = true
+            val length = min(distance * 0.6f, bounds.height() * 0.85f)
+            val duration = (length / BIG_SPEED_PX_PER_MS).toLong().coerceIn(40L, 140L)
+            val y0 = bounds.top + bounds.height() * 0.08f
+            dispatchStroke(token, iter, node, action, bounds.exactCenterX(), y0, y0 + length, duration, BIG_GAP_MS)
+        } else {
+            bigRan = false
+            if (bounds.height() < 400) {
+                pageUp(token, iter, node, action)
+                return
+            }
+            val y0 = bounds.top + bounds.height() * 0.40f
+            val length = FLICK_DP * resources.displayMetrics.density
+            dispatchStroke(token, iter, node, action, bounds.exactCenterX(), y0, y0 + length, FLICK_MS, GAP_MS)
+        }
+    }
+
+    private fun dispatchStroke(
+        token: Int,
+        iter: Int,
+        node: AccessibilityNodeInfo,
+        action: AccessibilityAction,
+        x: Float,
+        yStart: Float,
+        yEnd: Float,
+        durationMs: Long,
+        gapMs: Long
+    ) {
+        val path = Path().apply {
+            moveTo(x, yStart)
+            lineTo(x, yEnd)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                handler.postDelayed({ step(token, iter + 1) }, gapMs)
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                handler.postDelayed({ step(token, iter + 1) }, 60)
+            }
+        }, handler)
+
+        if (!dispatched) pageUp(token, iter, node, action)
+    }
+
+    /** Notnagel, falls keine Geste möglich ist: eine Seite per Scroll-Aktion nach oben. */
+    private fun pageUp(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
+        node.performAction(action.id)
+        handler.postDelayed({ step(token, iter + 1) }, PAGE_DELAY_MS)
+    }
+
+    // ---------------------------------------------------------------- Entfernungsschätzung
+
+    /**
+     * Restentfernung bis zum Anfang in Pixel. Beim ersten Mal wird geschätzt; danach wird nur noch
+     * ein Referenz-Element beobachtet (ein einziger schneller Abruf), wie weit es sich bewegt hat.
+     */
+    private fun remainingDistance(node: AccessibilityNodeInfo, vp: Rect): Int {
+        val ref = refNode
+        if (ref != null && ref.refresh()) {
+            val r = Rect()
+            ref.getBoundsInScreen(r)
+            val moved = max(0, r.top - refTop0)
+            return max(0, distance0 - moved)
+        }
+        distance0 = estimateDistance(node, vp)
+        pickReference(node, vp)
+        return distance0
+    }
+
+    /**
+     * Schätzt die Strecke bis zum Anfang:
+     *  A) Webseiten (z. B. Firefox) melden auch Elemente oberhalb des sichtbaren Bereichs -> deren Lage
+     *     (10-%-Quantil, damit einzelne versteckte Elemente nicht stören).
+     *  B) Listen melden den Index des ersten sichtbaren Eintrags -> Index mal mittlere Eintragshöhe (70 %).
+     * Im Zweifel lieber zu klein schätzen (dann gibt es nur mehr Schritte, kein Überschwingen).
+     */
+    private fun estimateDistance(node: AccessibilityNodeInfo, vp: Rect): Int {
+        val r = Rect()
+
+        val tops = ArrayList<Int>()
+        var visited = 0
+        fun visit(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || visited >= 3000 || depth > MAX_DEPTH) return
+            visited++
+            n.getBoundsInScreen(r)
+            if (r.width() > 0 && r.height() > 0 && r.bottom <= vp.top && r.top > -300000) tops.add(r.top)
+            for (i in 0 until n.childCount) visit(n.getChild(i), depth + 1)
+        }
+        visit(node, 0)
+        var a = 0
+        if (tops.size >= 8) {
+            tops.sort()
+            a = max(0, vp.top - tops[tops.size / 10])
+        }
+
+        var firstIndex = Int.MAX_VALUE
+        var firstTop = 0
+        var sumHeight = 0
+        var count = 0
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (!child.isVisibleToUser) continue
+            val info = child.collectionItemInfo ?: continue
+            child.getBoundsInScreen(r)
+            sumHeight += r.height()
+            count++
+            if (info.rowIndex in 0 until firstIndex) {
+                firstIndex = info.rowIndex
+                firstTop = r.top
+            }
+        }
+        var b = 0
+        if (count > 0 && firstIndex in 1 until Int.MAX_VALUE) {
+            b = firstIndex * (sumHeight / count) + max(0, vp.top - firstTop)
+        }
+
+        return max(a, (b * 0.7f).toInt())
+    }
+
+    /** Wählt ein sichtbares Element nahe der Bildschirmmitte, dessen Bewegung wir verfolgen. */
+    private fun pickReference(node: AccessibilityNodeInfo, vp: Rect) {
+        refNode = null
+        val r = Rect()
+        var visited = 0
+        var bestDistance = Int.MAX_VALUE
+        val centerY = vp.centerY()
+
+        fun visit(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || visited >= 600 || depth > MAX_DEPTH || !n.isVisibleToUser) return
+            visited++
+            n.getBoundsInScreen(r)
+            if (r.width() > 0 && r.height() in 30..(vp.height() / 2)) {
+                val d = abs(r.centerY() - centerY)
+                if (d < bestDistance) {
+                    bestDistance = d
+                    refNode = n
+                    refTop0 = r.top
+                }
+            }
+            for (i in 0 until n.childCount) visit(n.getChild(i), depth + 1)
+        }
+        visit(node, 0)
     }
 
     /** Grober Abdruck der Positionen im Teilbaum – ändert sich, solange gescrollt wird. */
@@ -384,45 +573,6 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
 
         visit(node, 0)
         return h
-    }
-
-    /** Notnagel, falls keine Geste möglich ist: eine Seite per Scroll-Aktion nach oben. */
-    private fun pageUp(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
-        node.performAction(action.id)
-        handler.postDelayed({ step(token, iter + 1) }, PAGE_DELAY_MS)
-    }
-
-    private fun flick(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
-        val bounds = Rect()
-        node.getBoundsInScreen(bounds)
-        bounds.intersect(wm.currentWindowMetrics.bounds)
-        if (bounds.height() < 400) {
-            pageUp(token, iter, node, action)
-            return
-        }
-
-        val distance = FLICK_DP * resources.displayMetrics.density
-        val x = bounds.exactCenterX()
-        val y0 = bounds.top + bounds.height() * 0.40f
-        val path = Path().apply {
-            moveTo(x, y0)
-            lineTo(x, y0 + distance)
-        }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, FLICK_MS))
-            .build()
-
-        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                handler.postDelayed({ step(token, iter + 1) }, GAP_MS)
-            }
-
-            override fun onCancelled(gestureDescription: GestureDescription?) {
-                handler.postDelayed({ step(token, iter + 1) }, 60)
-            }
-        }, handler)
-
-        if (!dispatched) pageUp(token, iter, node, action)
     }
 
     /**
@@ -479,5 +629,8 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         const val FLICK_MS = 32L
         const val GAP_MS = 25L
         const val PAGE_DELAY_MS = 100L
+        const val BIG_MIN_PX = 700
+        const val BIG_SPEED_PX_PER_MS = 20f
+        const val BIG_GAP_MS = 15L
     }
 }
