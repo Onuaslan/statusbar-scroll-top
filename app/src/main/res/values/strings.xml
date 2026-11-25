@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Statusleiste nach oben</string>
+    <string name="service_description">Tippen auf die Statusleiste (Uhr/Kamera-Bereich) scrollt die aktuelle Liste oder Seite wie bei iOS ganz nach oben. Ein Wischen nach unten im selben Bereich öffnet weiterhin Benachrichtigungen bzw. Schnelleinstellungen. Der Dienst liest dafür die Bedienelemente der aktuellen App, speichert oder sendet aber nichts.</string>
+</resources>
