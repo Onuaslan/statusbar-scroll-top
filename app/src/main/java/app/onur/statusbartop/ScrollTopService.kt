@@ -327,34 +327,45 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         return sb.toString()
     }
 
+    // Ablauf: Ziel einmal suchen, dann in dichter Folge kurze, sehr schnelle Wisch-Gesten nach unten.
+    // Kurzer Zugweg + hohe Geschwindigkeit = Fling mit Schwung (flüssig und schnell), aber der Zug ist
+    // zu kurz, um am Seitenanfang "Neu laden" auszulösen. Zwischen den Gesten wird nur geprüft, ob die
+    // "Hoch"-Aktion noch gemeldet wird – ist sie weg, ist man oben angekommen.
+    private var currentTarget: AccessibilityNodeInfo? = null
+    private var lastFingerprint = 0L
+    private var sameCount = 0
+
     private fun step(token: Int, iter: Int) {
         if (token != scrollToken || iter >= MAX_STEPS) return
 
-        val root = rootInActiveWindow ?: return
-        val (node, action) = findTarget(root) ?: return // nichts mehr zum Hochscrollen -> fertig
-
-        // Bewegt sich nichts mehr (z. B. oben angekommen, Aktion bleibt aber gemeldet), aufhören.
-        val fp = fingerprint(node)
-        if (fp == lastFingerprint) {
-            sameCount++
-            if (sameCount >= STAGNATION_LIMIT) return
+        val kept = if (iter > 0) currentTarget else null
+        val node: AccessibilityNodeInfo
+        val action: AccessibilityAction
+        if (kept != null && kept.refresh()) {
+            node = kept
+            action = scrollUpAction(kept) ?: return // Aktion weg -> oben angekommen
         } else {
-            sameCount = 0
-            lastFingerprint = fp
+            val root = rootInActiveWindow ?: return
+            val found = findTarget(root) ?: return // nichts zum Hochscrollen -> fertig
+            node = found.first
+            action = found.second
+            currentTarget = node
         }
 
-        // Wisch-Gesten NUR, wenn die App die Listenposition meldet und wir weit vom Anfang entfernt sind.
-        // Sonst (z. B. Webseiten) nur Scroll-Aktionen: die schwingen nie über und lösen kein "Neu laden" aus.
-        val distance = distanceEstimate(node)
-        if (distance != null && distance > NEAR_ITEMS) {
-            flingDown(token, iter, node, action)
-        } else {
-            pageUp(token, iter, node, action, burst = distance == null)
+        // Falls die App die Aktion auch ganz oben weiter meldet: bei Stillstand aufhören.
+        if (iter % FINGERPRINT_EVERY == FINGERPRINT_EVERY - 1) {
+            val fp = fingerprint(node)
+            if (fp == lastFingerprint) {
+                sameCount++
+                if (sameCount >= 2) return
+            } else {
+                sameCount = 0
+                lastFingerprint = fp
+            }
         }
+
+        flick(token, iter, node, action)
     }
-
-    private var lastFingerprint = 0L
-    private var sameCount = 0
 
     /** Grober Abdruck der Positionen im Teilbaum – ändert sich, solange gescrollt wird. */
     private fun fingerprint(node: AccessibilityNodeInfo): Long {
@@ -375,43 +386,39 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         return h
     }
 
-    private fun pageUp(
-        token: Int,
-        iter: Int,
-        node: AccessibilityNodeInfo,
-        action: AccessibilityAction,
-        burst: Boolean = false
-    ) {
+    /** Notnagel, falls keine Geste möglich ist: eine Seite per Scroll-Aktion nach oben. */
+    private fun pageUp(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
         node.performAction(action.id)
-        if (burst) node.performAction(action.id) // bei unbekannter Entfernung zwei Seiten pro Schritt
         handler.postDelayed({ step(token, iter + 1) }, PAGE_DELAY_MS)
     }
 
-    private fun flingDown(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
+    private fun flick(token: Int, iter: Int, node: AccessibilityNodeInfo, action: AccessibilityAction) {
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         bounds.intersect(wm.currentWindowMetrics.bounds)
-        if (bounds.height() < 300) {
+        if (bounds.height() < 400) {
             pageUp(token, iter, node, action)
             return
         }
 
+        val distance = FLICK_DP * resources.displayMetrics.density
         val x = bounds.exactCenterX()
+        val y0 = bounds.top + bounds.height() * 0.40f
         val path = Path().apply {
-            moveTo(x, bounds.top + bounds.height() * 0.20f)
-            lineTo(x, bounds.top + bounds.height() * 0.85f)
+            moveTo(x, y0)
+            lineTo(x, y0 + distance)
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, FLICK_MS))
             .build()
 
         val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
-                handler.postDelayed({ step(token, iter + 1) }, 80)
+                handler.postDelayed({ step(token, iter + 1) }, GAP_MS)
             }
 
             override fun onCancelled(gestureDescription: GestureDescription?) {
-                handler.postDelayed({ step(token, iter + 1) }, 120)
+                handler.postDelayed({ step(token, iter + 1) }, 60)
             }
         }, handler)
 
@@ -464,25 +471,13 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         return null
     }
 
-    /** Kleinster sichtbarer Listenindex (falls die App ihn meldet) – grobe Entfernung zum Anfang. */
-    private fun distanceEstimate(node: AccessibilityNodeInfo): Int? {
-        var min: Int? = null
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            if (!child.isVisibleToUser) continue
-            val index = child.collectionItemInfo?.rowIndex ?: continue
-            if (index < 0) continue
-            val current = min
-            if (current == null || index < current) min = index
-        }
-        return min
-    }
-
     private companion object {
-        const val MAX_STEPS = 80
+        const val MAX_STEPS = 600
         const val MAX_DEPTH = 60
-        const val NEAR_ITEMS = 20
-        const val STAGNATION_LIMIT = 4
+        const val FINGERPRINT_EVERY = 4
+        const val FLICK_DP = 48f
+        const val FLICK_MS = 32L
+        const val GAP_MS = 25L
         const val PAGE_DELAY_MS = 100L
     }
 }
