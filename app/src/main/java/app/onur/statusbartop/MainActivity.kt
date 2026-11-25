@@ -98,7 +98,12 @@ class MainActivity : Activity() {
         super.onResume()
         val active = isServiceEnabled()
         statusText.text = if (active) "Dienst: aktiv ✓" else "Dienst: NICHT aktiv"
-        diagText.text = Prefs.get(this).getString(Prefs.LAST_DIAG, null) ?: "(noch keine Diagnose)"
+        val p = Prefs.get(this)
+        diagText.text = listOf(
+            p.getString(Prefs.LAST_STATE, null) ?: "Streifen: (noch kein Zustand aufgezeichnet)",
+            p.getString(Prefs.LAST_TOUCH, null) ?: "Touch: (noch keiner angekommen)",
+            p.getString(Prefs.LAST_DIAG, null) ?: "Scroll-Diagnose: (noch keine)"
+        ).joinToString("\n\n")
     }
 
     private fun switchRow(

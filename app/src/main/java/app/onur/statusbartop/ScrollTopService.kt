@@ -60,7 +60,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
     }
 
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
-        if (key == Prefs.LAST_DIAG) return // Diagnose-Text schreiben darf den Streifen nicht neu aufbauen
+        if (key != null && Prefs.isDiagKey(key)) return // Diagnose-Texte dürfen den Streifen nicht neu aufbauen
         rebuildOverlay()
     }
 
@@ -117,6 +117,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
                 statusBarVisible = visible
                 applyTouchability()
             }
+            recordState()
             insets
         }
         view.setOnTouchListener { _, ev -> onOverlayTouch(ev) }
@@ -152,7 +153,9 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         val view = overlay ?: return
         val lp = overlayParams ?: return
         val hideInFullscreen = prefs.getBoolean(Prefs.HIDE_FULLSCREEN, true)
-        val touchable = !systemUiActive && (statusBarVisible || !hideInFullscreen)
+        // Das Benachrichtigungsfeld (SystemUI) sperrt den Streifen bewusst nicht mehr:
+        // die Erkennung war unzuverlässig und konnte den Streifen dauerhaft abschalten.
+        val touchable = statusBarVisible || !hideInFullscreen
 
         val newFlags = if (touchable) {
             lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
@@ -167,6 +170,31 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
             } catch (_: Exception) {
             }
         }
+        recordState()
+    }
+
+    // ---------------------------------------------------------------- Diagnose: Zustand und Touches
+
+    private var touchCount = 0
+
+    private fun now(): String =
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.GERMANY).format(java.util.Date())
+
+    private fun recordState() {
+        if (!::prefs.isInitialized || !prefs.getBoolean(Prefs.DEBUG_TINT, false)) return
+        val lp = overlayParams
+        val touchable = lp != null && (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
+        val text = "Streifen: berührbar=$touchable, Statusleiste sichtbar=$statusBarVisible, " +
+            "SystemUI aktiv=$systemUiActive, Höhe=${lp?.height} px, Stand ${now()}"
+        prefs.edit().putString(Prefs.LAST_STATE, text).apply()
+    }
+
+    private fun recordTouch(x: Float, y: Float) {
+        if (!prefs.getBoolean(Prefs.DEBUG_TINT, false)) return
+        touchCount++
+        val pkg = rootInActiveWindow?.packageName
+        val text = "Touch Nr. $touchCount um ${now()} bei x=${x.toInt()}, y=${y.toInt()}, Vordergrund-App=$pkg"
+        prefs.edit().putString(Prefs.LAST_TOUCH, text).apply()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -195,6 +223,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
                 downY = ev.rawY
                 downTime = ev.eventTime
                 swiped = false
+                recordTouch(ev.rawX, ev.rawY)
             }
 
             MotionEvent.ACTION_MOVE -> {
