@@ -408,10 +408,16 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
 
         if (!bigDisabled && distance > BIG_MIN_PX) {
             bigRan = true
-            val length = min(distance * 0.6f, bounds.height() * 0.85f)
-            val duration = (length / BIG_SPEED_PX_PER_MS).toLong().coerceIn(40L, 140L)
-            val y0 = bounds.top + bounds.height() * 0.08f
-            dispatchStroke(token, iter, node, action, bounds.exactCenterX(), y0, y0 + length, duration, BIG_GAP_MS)
+            val maxLength = bounds.height() * BIG_LEN_FRACTION
+            val plan = distance * BIG_FRACTION
+            val count = Math.ceil((plan / maxLength).toDouble()).toInt().coerceIn(1, BIG_MAX_STROKES)
+            val length = min(maxLength, plan / count)
+            val duration = (length / BIG_SPEED_PX_PER_MS).toLong().coerceIn(30L, 110L)
+            val y0 = bounds.top + bounds.height() * 0.06f
+            val strokes = (0 until count).map { k ->
+                StrokeSpec(y0, y0 + length, k * (duration + STROKE_PAUSE_MS), duration)
+            }
+            dispatchStrokes(token, iter, node, action, bounds.exactCenterX(), strokes, BIG_GAP_MS)
         } else {
             bigRan = false
             if (bounds.height() < 400) {
@@ -424,6 +430,13 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         }
     }
 
+    private class StrokeSpec(
+        val yStart: Float,
+        val yEnd: Float,
+        val startMs: Long,
+        val durationMs: Long
+    )
+
     private fun dispatchStroke(
         token: Int,
         iter: Int,
@@ -435,15 +448,29 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         durationMs: Long,
         gapMs: Long
     ) {
-        val path = Path().apply {
-            moveTo(x, yStart)
-            lineTo(x, yEnd)
-        }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
-            .build()
+        dispatchStrokes(token, iter, node, action, x, listOf(StrokeSpec(yStart, yEnd, 0L, durationMs)), gapMs)
+    }
 
-        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+    /** Mehrere Wisch-Striche nacheinander in EINER Geste: keine Rückfrage-Pausen dazwischen. */
+    private fun dispatchStrokes(
+        token: Int,
+        iter: Int,
+        node: AccessibilityNodeInfo,
+        action: AccessibilityAction,
+        x: Float,
+        strokes: List<StrokeSpec>,
+        gapMs: Long
+    ) {
+        val builder = GestureDescription.Builder()
+        for (sp in strokes) {
+            val path = Path().apply {
+                moveTo(x, sp.yStart)
+                lineTo(x, sp.yEnd)
+            }
+            builder.addStroke(GestureDescription.StrokeDescription(path, sp.startMs, sp.durationMs))
+        }
+
+        val dispatched = dispatchGesture(builder.build(), object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 handler.postDelayed({ step(token, iter + 1) }, gapMs)
             }
@@ -563,7 +590,7 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
         val r = Rect()
 
         fun visit(n: AccessibilityNodeInfo?, depth: Int) {
-            if (n == null || count >= 150 || depth > 30) return
+            if (n == null || count >= 80 || depth > 30) return
             count++
             n.getBoundsInScreen(r)
             h = h * 31 + r.top
@@ -624,13 +651,17 @@ class ScrollTopService : AccessibilityService(), SharedPreferences.OnSharedPrefe
     private companion object {
         const val MAX_STEPS = 600
         const val MAX_DEPTH = 60
-        const val FINGERPRINT_EVERY = 4
-        const val FLICK_DP = 48f
-        const val FLICK_MS = 32L
-        const val GAP_MS = 25L
+        const val FINGERPRINT_EVERY = 6
+        const val FLICK_DP = 64f
+        const val FLICK_MS = 28L
+        const val GAP_MS = 10L
         const val PAGE_DELAY_MS = 100L
-        const val BIG_MIN_PX = 700
-        const val BIG_SPEED_PX_PER_MS = 20f
-        const val BIG_GAP_MS = 15L
+        const val BIG_MIN_PX = 500
+        const val BIG_SPEED_PX_PER_MS = 30f
+        const val BIG_GAP_MS = 0L
+        const val BIG_FRACTION = 0.75f
+        const val BIG_LEN_FRACTION = 0.92f
+        const val BIG_MAX_STROKES = 3
+        const val STROKE_PAUSE_MS = 6L
     }
 }
